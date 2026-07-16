@@ -1,0 +1,12 @@
+my_env/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Large raw data files (too big for GitHub)
+raw_data/*.csv
+raw_data/*.txt
+raw_data/*.pdf
+
+# Output data
+output/*.csv
