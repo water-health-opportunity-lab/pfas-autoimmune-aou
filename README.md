@@ -24,8 +24,9 @@ The raw data files are too large for GitHub. Download them and place them in `ra
 5. Drops unresolvable tribal systems, missing ZIPs, incomplete contaminant coverage, and U.S. territories
 6. Joins self-reported survey data (prior PFAS detections, known nearby sources, treatment status)
 7. Joins SDWIS data (population served, water source type, service connections)
+8. Aggregates to one row per ZIP3 + contaminant, using population served as weights for concentration and detection rate metrics
 
-**Output:** `output/ucmr5_analysis_zip3.csv` — one row per PWSID + contaminant + ZIP3 combination.
+**Output:** `output/ucmr5_analysis_zip3.csv` — one row per ZIP3 + contaminant combination, with population-weighted statistics.
 
 ## Setup
 

@@ -28,7 +28,10 @@
 #      - ServiceConnections: number of service connections
 #   9. Save to output/ucmr5_analysis_zip3.csv
 #
-# Output: one row per PWSID + Contaminant + Zip3 combination
+#   10. Aggregate to one row per Zip3 + Contaminant, using population-served
+#       as weights for concentration and detection rate metrics
+#
+# Output: one row per Zip3 + Contaminant combination
 
 import os
 import pandas as pd
@@ -215,26 +218,53 @@ sdwa["ServiceConnections"] = pd.to_numeric(sdwa["ServiceConnections"], errors="c
 
 agg = agg.merge(sdwa, on="PWSID", how="left")
 
-# ── Save ──
-agg.to_csv(os.path.join(OUT_DIR, "ucmr5_analysis_zip3.csv"), index=False)
+# Drop rows without population data (can't weight them)
+agg = agg[agg["PopulationServed"].notna() & (agg["PopulationServed"] > 0)]
 
-print("Output shape:", agg.shape)
+# ── Aggregate to one row per Zip3 + Contaminant (population-weighted) ──
+def pop_weighted_mean(group, col):
+    weights = group["PopulationServed"]
+    return np.average(group[col], weights=weights)
+
+zip3_agg = agg.groupby(["Zip3", "Contaminant"]).apply(
+    lambda g: pd.Series({
+        "MeanConcentration": pop_weighted_mean(g, "MeanConcentration"),
+        "MaxConcentration": pop_weighted_mean(g, "MaxConcentration"),
+        "MRL": g["MRL"].iloc[0],
+        "Units": g["Units"].iloc[0],
+        "DetectionRate": pop_weighted_mean(g, "DetectionRate"),
+        "NumSamples": g["NumSamples"].sum(),
+        "NumDetections": g["NumDetections"].sum(),
+        "NumSystems": g["PWSID"].nunique(),
+        "State": g["State"].mode().iloc[0],
+        "PopulationServed": g["PopulationServed"].sum(),
+        "ServiceConnections": g["ServiceConnections"].sum(),
+        "WaterSourceType": g["WaterSourceType"].mode().iloc[0] if g["WaterSourceType"].notna().any() else np.nan,
+        "PriorPFAS": g["PriorPFAS"].mode().iloc[0] if g["PriorPFAS"].notna().any() else np.nan,
+        "KnownPFASSources": g["KnownPFASSources"].mode().iloc[0] if g["KnownPFASSources"].notna().any() else np.nan,
+        "HasPFASTreatment": pop_weighted_mean(g, "HasPFASTreatment"),
+        **{col: pop_weighted_mean(g, col) for col in src_cols},
+    }),
+    include_groups=False,
+).reset_index()
+
+# ── Save ──
+zip3_agg.to_csv(os.path.join(OUT_DIR, "ucmr5_analysis_zip3.csv"), index=False)
+
+print("Output shape:", zip3_agg.shape)
 print("\nColumns:")
-print(agg.dtypes.to_string())
+print(zip3_agg.dtypes.to_string())
 print("\nFirst 5 rows (core columns):")
-print(agg[["PWSID", "Contaminant", "MeanConcentration", "State", "Zip3",
-           "PopulationServed", "WaterSourceType", "ServiceConnections"]].head(5).to_string())
+print(zip3_agg[["Zip3", "Contaminant", "MeanConcentration", "MaxConcentration",
+                "State", "NumSystems", "PopulationServed"]].head(5).to_string())
 print("\nMissing values:")
-missing = agg.isnull().sum()
+missing = zip3_agg.isnull().sum()
 missing = missing[missing > 0]
 if len(missing) > 0:
     print(missing.to_string())
 else:
     print("  None")
-print(f"\nSDWIS coverage:")
-print(f"  PopulationServed filled: {agg['PopulationServed'].notna().sum():,} / {len(agg):,}")
-print(f"  WaterSourceType filled: {agg['WaterSourceType'].notna().sum():,} / {len(agg):,}")
+print(f"\nUnique Zip3 values: {zip3_agg['Zip3'].nunique()}")
+print(f"Unique contaminants: {zip3_agg['Contaminant'].nunique()}")
 print(f"\nPopulationServed stats:")
-print(agg["PopulationServed"].describe().to_string())
-print(f"\nWaterSourceType breakdown:")
-print(agg["WaterSourceType"].value_counts().to_string())
+print(zip3_agg["PopulationServed"].describe().to_string())
