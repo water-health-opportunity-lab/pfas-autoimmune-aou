@@ -50,16 +50,18 @@ df = pd.read_csv(
 )
 
 # Keep only the important columns
-df = df[[
-    "PWSID",
-    "CollectionDate",
-    "Contaminant",
-    "MRL",
-    "Units",
-    "AnalyticalResultsSign",
-    "AnalyticalResultValue",
-    "State",
-]]
+df = df[
+    [
+        "PWSID",
+        "CollectionDate",
+        "Contaminant",
+        "MRL",
+        "Units",
+        "AnalyticalResultsSign",
+        "AnalyticalResultValue",
+        "State",
+    ]
+]
 
 # Impute below-MRL samples with MRL / sqrt(2)
 below_mrl = df["AnalyticalResultsSign"] == "<"
@@ -69,73 +71,104 @@ df.loc[below_mrl, "AnalyticalResultValue"] = df.loc[below_mrl, "MRL"] / np.sqrt(
 df["Detected"] = (~below_mrl).astype(int)
 
 # Aggregate to one row per PWSID + Contaminant
-agg = df.groupby(["PWSID", "Contaminant"]).agg(
-    MeanConcentration=("AnalyticalResultValue", "mean"),
-    MaxConcentration=("AnalyticalResultValue", "max"),
-    MRL=("MRL", "first"),
-    Units=("Units", "first"),
-    DetectionRate=("Detected", "mean"),
-    NumSamples=("Detected", "count"),
-    NumDetections=("Detected", "sum"),
-    State=("State", "first"),
-).reset_index()
+agg = (
+    df.groupby(["PWSID", "Contaminant"])
+    .agg(
+        MeanConcentration=("AnalyticalResultValue", "mean"),
+        MaxConcentration=("AnalyticalResultValue", "max"),
+        MRL=("MRL", "first"),
+        Units=("Units", "first"),
+        DetectionRate=("Detected", "mean"),
+        NumSamples=("Detected", "count"),
+        NumDetections=("Detected", "sum"),
+        State=("State", "first"),
+    )
+    .reset_index()
+)
 
 # ── Join Zip3 codes ──
 zips = pd.read_csv(os.path.join(RAW_DIR, "UCMR5_ZIPCodes.txt"), sep="\t", dtype=str)
 zips["ZIP3"] = zips["ZIPCODE"].str[:3]
-zips_grouped = zips.groupby("PWSID")["ZIP3"].apply(
-    lambda x: ",".join(sorted(x.unique()))
-).reset_index()
-zips_grouped.rename(columns={"ZIP3": "Zip3"}, inplace=True)
+zips_unique = zips[["PWSID", "ZIP3"]].drop_duplicates().rename(columns={"ZIP3": "Zip3"})
 
-agg = agg.merge(zips_grouped, on="PWSID", how="left")
+agg = agg.merge(zips_unique, on="PWSID", how="left")
+
+# Drop rows without Zip3 (PWSIDs not in the zip code file)
+# drops 5192 out of 355067
+agg = agg[agg["Zip3"].notna()]
+
 
 # ── Resolve numeric state codes ──
 is_numeric_state = agg["State"].str.match(r"^\d+$")
-has_alpha_and_zip = (~is_numeric_state) & agg["Zip3"].notna()
 
-prefix_records = []
-for _, row in agg.loc[has_alpha_and_zip, ["State", "Zip3"]].drop_duplicates().iterrows():
-    for z in row["Zip3"].split(","):
-        prefix_records.append({"prefix": z, "State": row["State"]})
 prefix_map = (
-    pd.DataFrame(prefix_records)
-    .groupby("prefix")["State"]
+    agg.loc[~is_numeric_state, ["Zip3", "State"]]
+    .drop_duplicates()
+    .groupby("Zip3")["State"]
     .agg(lambda x: x.mode()[0])
     .to_dict()
 )
 
-needs_fix = is_numeric_state & agg["Zip3"].notna()
-agg.loc[needs_fix, "State"] = agg.loc[needs_fix, "Zip3"].apply(
-    lambda z: prefix_map.get(z.split(",")[0], None)
-)
+agg.loc[is_numeric_state, "State"] = agg.loc[is_numeric_state, "Zip3"].map(prefix_map)
 
 # ── Drop rows ──
-agg = agg[~agg["State"].str.match(r"^\d+$", na=False)]
-agg = agg[agg["Zip3"].notna()]
-contam_counts = agg.groupby("PWSID")["Contaminant"].transform("count")
-agg = agg[contam_counts == 29]
+
+contam_counts = agg.groupby(["PWSID", "Zip3"])["Contaminant"].transform("count")
+
+
+# drops 95310 out of 349872 rows(a lot)
+# agg = agg[contam_counts == 29]
+
+print("\n── Detections above MRL per contaminant ──")
+detections_per_contam = (
+    agg.groupby("Contaminant")["NumDetections"].sum().sort_values(ascending=False)
+)
+print(detections_per_contam.to_string())
+
+# remove the contaminants that are above the mrl <100 times, 12 contaminants are left out of 29 (17 removed)
+low_detection_contaminants = {
+    "PFDA",
+    "PFUnA",
+    "8:2 FTS",
+    "PFHpS",
+    "NFDHA",
+    "ADONA",
+    "PFDoA",
+    "4:2 FTS",
+    "PFMPA",
+    "NMeFOSAA",
+    "PFMBA",
+    "NEtFOSAA",
+    "9Cl-PF3ONS",
+    "PFTrDA",
+    "11Cl-PF3OUdS",
+    "PFTA",
+    "PFEESA",
+    "PFPeS",
+    "HFPO-DA",
+    "PFNA",
+    "6:2 FTS",
+}
+agg = agg[~agg["Contaminant"].isin(low_detection_contaminants)]
+
 territories = {"AS", "GU", "MP", "VI", "PR", "NN"}
 agg = agg[~agg["State"].isin(territories)]
 
-# Replace raw Units with symbol
-agg["Units"] = "µg/L"
-
-# Explode comma-separated Zip3 into separate rows
-agg["Zip3"] = agg["Zip3"].str.split(",")
-agg = agg.explode("Zip3").reset_index(drop=True)
-
 # ── Join self-reported survey data from UCMR5_AddtlDataElem.txt ──
 addtl = pd.read_csv(
-    os.path.join(RAW_DIR, "UCMR5_AddtlDataElem.txt"), sep="\t", dtype=str,
+    os.path.join(RAW_DIR, "UCMR5_AddtlDataElem.txt"),
+    sep="\t",
+    dtype=str,
 )
 
 # Helper: for each PWSID, pick the most informative response across sample events
 # Priority: Yes > DK > No (if they ever said Yes, that matters most)
 RESPONSE_PRIORITY = {"Yes": 2, "DK": 1, "No": 0}
 
+
 def best_response(series):
     return max(series, key=lambda x: RESPONSE_PRIORITY.get(x, -1))
+
 
 # PriorPFAS: has the system previously detected PFAS?
 pfas_occ = addtl[addtl["AdditionalDataElement"] == "PFASOccurrence"]
@@ -186,9 +219,11 @@ detail_pivot = detail_pivot.drop(columns=["Response"])
 
 # HasPFASTreatment: is the system treating for PFAS? (anything other than NMT)
 pfas_treat = addtl[addtl["AdditionalDataElement"] == "PFASTreatment"]
-treat_agg = pfas_treat.groupby("PWSID")["Response"].apply(
-    lambda x: int(any(r != "NMT" for r in x))
-).reset_index()
+treat_agg = (
+    pfas_treat.groupby("PWSID")["Response"]
+    .apply(lambda x: int(any(r != "NMT" for r in x)))
+    .reset_index()
+)
 treat_agg.rename(columns={"Response": "HasPFASTreatment"}, inplace=True)
 
 # Merge all survey data onto main dataset
@@ -202,61 +237,107 @@ src_cols = list(SOURCE_CODES.values())
 agg[src_cols] = agg[src_cols].fillna(0).astype(int)
 agg["HasPFASTreatment"] = agg["HasPFASTreatment"].fillna(0).astype(int)
 
+
+agg.to_csv(os.path.join(OUT_DIR, "ucmr5_pwsid_contaminant.csv"), index=False)
+# start of second half, there are 251053 rows of pwsid & contaminant combinations
+
+
 # ── Join SDWIS population and water system data ──
 sdwa = pd.read_csv(
     os.path.join(RAW_DIR, "SDWA_PUB_WATER_SYSTEMS.csv"),
     dtype=str,
-    usecols=["PWSID", "POPULATION_SERVED_COUNT", "GW_SW_CODE", "SERVICE_CONNECTIONS_COUNT"],
+    usecols=[
+        "PWSID",
+        "POPULATION_SERVED_COUNT",
+        "GW_SW_CODE",
+        "SERVICE_CONNECTIONS_COUNT",
+    ],
 )
-sdwa.rename(columns={
-    "POPULATION_SERVED_COUNT": "PopulationServed",
-    "GW_SW_CODE": "WaterSourceType",
-    "SERVICE_CONNECTIONS_COUNT": "ServiceConnections",
-}, inplace=True)
+sdwa.rename(
+    columns={
+        "POPULATION_SERVED_COUNT": "PopulationServed",
+        "GW_SW_CODE": "WaterSourceType",
+        "SERVICE_CONNECTIONS_COUNT": "ServiceConnections",
+    },
+    inplace=True,
+)
 sdwa["PopulationServed"] = pd.to_numeric(sdwa["PopulationServed"], errors="coerce")
 sdwa["ServiceConnections"] = pd.to_numeric(sdwa["ServiceConnections"], errors="coerce")
 
 agg = agg.merge(sdwa, on="PWSID", how="left")
 
 # Drop rows without population data (can't weight them)
+# drops 232 rows out of 251053
 agg = agg[agg["PopulationServed"].notna() & (agg["PopulationServed"] > 0)]
+
 
 # ── Aggregate to one row per Zip3 + Contaminant (population-weighted) ──
 def pop_weighted_mean(group, col):
     weights = group["PopulationServed"]
     return np.average(group[col], weights=weights)
 
-zip3_agg = agg.groupby(["Zip3", "Contaminant"]).apply(
-    lambda g: pd.Series({
-        "MeanConcentration": pop_weighted_mean(g, "MeanConcentration"),
-        "MaxConcentration": pop_weighted_mean(g, "MaxConcentration"),
-        "MRL": g["MRL"].iloc[0],
-        "Units": g["Units"].iloc[0],
-        "DetectionRate": pop_weighted_mean(g, "DetectionRate"),
-        "NumSamples": g["NumSamples"].sum(),
-        "NumDetections": g["NumDetections"].sum(),
-        "NumSystems": g["PWSID"].nunique(),
-        "State": g["State"].mode().iloc[0],
-        "PopulationServed": g["PopulationServed"].sum(),
-        "ServiceConnections": g["ServiceConnections"].sum(),
-        "WaterSourceType": g["WaterSourceType"].mode().iloc[0] if g["WaterSourceType"].notna().any() else np.nan,
-        "PriorPFAS": g["PriorPFAS"].mode().iloc[0] if g["PriorPFAS"].notna().any() else np.nan,
-        "KnownPFASSources": g["KnownPFASSources"].mode().iloc[0] if g["KnownPFASSources"].notna().any() else np.nan,
-        "HasPFASTreatment": pop_weighted_mean(g, "HasPFASTreatment"),
-        **{col: pop_weighted_mean(g, col) for col in src_cols},
-    }),
-    include_groups=False,
-).reset_index()
 
+zip3_agg = (
+    agg.groupby(["Zip3", "Contaminant"])
+    .apply(
+        lambda g: pd.Series(
+            {
+                "MeanConcentration": pop_weighted_mean(g, "MeanConcentration"),
+                "MaxConcentration": pop_weighted_mean(g, "MaxConcentration"),
+                "MRL": g["MRL"].iloc[0],
+                "Units": g["Units"].iloc[0],
+                "DetectionRate": pop_weighted_mean(g, "DetectionRate"),
+                "NumSamples": g["NumSamples"].sum(),
+                "NumDetections": g["NumDetections"].sum(),
+                "NumSystems": g["PWSID"].nunique(),
+                "State": g["State"].mode().iloc[0],
+                "PopulationServed": g["PopulationServed"].sum(),
+                "ServiceConnections": g["ServiceConnections"].sum(),
+                "WaterSourceType": g["WaterSourceType"].mode().iloc[0]
+                if g["WaterSourceType"].notna().any()
+                else np.nan,
+                "PriorPFAS": "Yes"
+                if (g["PriorPFAS"] == "Yes").any()
+                else (
+                    "DK"
+                    if (g["PriorPFAS"] == "DK").any()
+                    else ("No" if g["PriorPFAS"].notna().any() else np.nan)
+                ),
+                "KnownPFASSources": ",".join(
+                    sorted(g["KnownPFASSources"].dropna().unique())
+                )
+                if g["KnownPFASSources"].notna().any()
+                else np.nan,
+                "HasPFASTreatment": int((g["HasPFASTreatment"] == 1).any()),
+                **{col: pop_weighted_mean(g, col) for col in src_cols},
+            }
+        ),
+        include_groups=False,
+    )
+    .reset_index()
+)
 # ── Save ──
-zip3_agg.to_csv(os.path.join(OUT_DIR, "ucmr5_analysis_zip3.csv"), index=False)
+zip3_agg.to_csv(os.path.join(OUT_DIR, "ucmr5_zip3_contaminant.csv"), index=False)
 
 print("Output shape:", zip3_agg.shape)
 print("\nColumns:")
 print(zip3_agg.dtypes.to_string())
 print("\nFirst 5 rows (core columns):")
-print(zip3_agg[["Zip3", "Contaminant", "MeanConcentration", "MaxConcentration",
-                "State", "NumSystems", "PopulationServed"]].head(5).to_string())
+print(
+    zip3_agg[
+        [
+            "Zip3",
+            "Contaminant",
+            "MeanConcentration",
+            "MaxConcentration",
+            "State",
+            "NumSystems",
+            "PopulationServed",
+        ]
+    ]
+    .head(5)
+    .to_string()
+)
 print("\nMissing values:")
 missing = zip3_agg.isnull().sum()
 missing = missing[missing > 0]
