@@ -125,7 +125,7 @@ detections_per_contam = (
 )
 print(detections_per_contam.to_string())
 
-# remove the contaminants that are above the mrl <100 times, 8 contaminants are left out of 29 (21 removed)
+# remove the contaminants that are above the mrl <1000 times, 8 contaminants are left out of 29 (21 removed)
 low_detection_contaminants = {
     "PFDA",
     "PFUnA",
@@ -303,11 +303,13 @@ zip3_agg = (
                     if (g["PriorPFAS"] == "DK").any()
                     else ("No" if g["PriorPFAS"].notna().any() else np.nan)
                 ),
-                "KnownPFASSources": ",".join(
-                    sorted(g["KnownPFASSources"].dropna().unique())
-                )
-                if g["KnownPFASSources"].notna().any()
-                else np.nan,
+                "KnownPFASSources": "Yes"
+                if (g["KnownPFASSources"] == "Yes").any()
+                else (
+                    "DK"
+                    if (g["KnownPFASSources"] == "DK").any()
+                    else ("No" if g["KnownPFASSources"].notna().any() else np.nan)
+                ),
                 "HasPFASTreatment": int((g["HasPFASTreatment"] == 1).any()),
                 **{col: pop_weighted_mean(g, col) for col in src_cols},
             }
